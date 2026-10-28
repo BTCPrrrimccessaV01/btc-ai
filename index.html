@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="pl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BTC AI Forecast System</title>
+<style>
+:root{--bg:#0d1117;--c:#161b22;--b:#30363d;--t:#e6edf3;--m:#8b949e;--g:#3fb950;--r:#f85149;--y:#d29922;--a:#58a6ff}
+@media(prefers-color-scheme:light){:root{--bg:#f6f8fa;--c:#fff;--b:#d0d7de;--t:#1f2328;--m:#656d76;--g:#1a7f37;--r:#cf222e;--y:#9a6700;--a:#0969da}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--t);font:14px/1.45 system-ui,sans-serif}
+header{padding:10px 14px;border-bottom:1px solid var(--b);display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between}
+h1{font-size:17px;margin:0}h2{font-size:16px;margin:8px 0}small,.mu{color:var(--m)}
+nav{display:flex;gap:4px;overflow-x:auto;padding:8px 10px;border-bottom:1px solid var(--b)}
+button,select{background:var(--c);color:var(--t);border:1px solid var(--b);border-radius:6px;padding:5px 9px;font:inherit;cursor:pointer}
+button.on{background:var(--a);color:#fff;border-color:var(--a)}nav button{white-space:nowrap}
+main{padding:10px 14px;max-width:1500px;margin:auto}
+.box{background:var(--c);border:1px solid var(--b);border-radius:8px;padding:10px;margin:8px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:8px}
+canvas{width:100%;height:230px;display:block}
+table{border-collapse:collapse;width:100%;font-size:12.5px}th,td{padding:4px 6px;border-bottom:1px solid var(--b);text-align:right;white-space:nowrap}th:first-child,td:first-child{text-align:left}
+.sc{overflow-x:auto}.up{color:var(--g)}.dn{color:var(--r)}.fl{color:var(--y)}
+.bar{display:flex;height:9px;border-radius:5px;overflow:hidden;margin:4px 0}.bar i{display:block}
+.warn{color:var(--y)}footer{padding:14px;color:var(--m);font-size:12px}pre{white-space:pre-wrap;font-size:12px}
+</style></head><body>
+<header><h1>₿ BTC AI Forecast System</h1><div id="st" class="mu"></div></header>
+<nav id="nav"></nav><main id="mn">Ładowanie…</main>
+<footer>Narzędzie badawcze – nie jest poradą inwestycyjną i niczego nie gwarantuje. Brak handlu prawdziwymi środkami. Prognozy = rozkłady prawdopodobieństwa weryfikowane po upływie horyzontu.</footer>
+<script>
+//PURE
+const D=864e5,H=[.5,2,4,10,24,46,80,120,280,377,666,1144,3333,5222],hl=h=>h<1?'12h':h+'d';
+const M=[
+['ON-CHAIN CORE','Wycena: Mayer Multiple (liczony z ceny) + Puell Multiple (blockchain.info). MVRV, NUPL, Realized Price są płatne → NIEDOSTĘPNE.'],
+['HOLDER BEHAVIOR','SOPR, HODL Waves, LTH – płatne (niedostępne). Zastępnik: trend aktywnych adresów. Brak historii → hipoteza, weryfikowana tylko na żywo.'],
+['EXCHANGE FLOWS','Netflow i rezerwy giełdowe – płatne. Zastępnik: wolumen transferów USD. Hipoteza, weryfikowana tylko na żywo.'],
+['MARKET MICROSTRUCTURE','Nierównowaga arkusza Binance (100 poziomów). Brak historii arkusza → weryfikacja tylko na żywo.'],
+['DERIVATIVES','Funding rate (Binance Futures), podejście kontrariańskie; OI i baza zapisywane w każdym cyklu. Weryfikacja tylko na żywo.'],
+['TECHNICAL & MOMENTUM','Momentum 30/90d znormalizowane zmiennością. Weryfikowane walk-forward.'],
+['REGIME ADAPTIVE','Reżim: trend (SMA50/200), konsolidacja, wysoka zmienność – metoda zależna od reżimu.'],
+['STATISTICAL ML','Regresja grzbietowa (ridge) na cechach cenowych, walk-forward, retrening co 90 dni.'],
+['PROBABILITY ENGINE','Empiryczne częstości wzrost/spadek/stagnacja ze znormalizowanych zwrotów (tylko dojrzałe obserwacje).'],
+['INDEPENDENT BASELINE','Brak zmiany + zmienność historyczna. Punkt odniesienia dla pozostałych.'],
+['TURBO MIX ENSEMBLE','Wagi ∝ przewaga Brier nad baseline, karane za korelację modeli (walk-forward, kauzalnie). Eksperymentalny.'],
+['TURBO MIX ADAPTIVE REGIME','Wagi liczone osobno dla reżimu; w wysokiej zmienności pewność ×0.5. Eksperymentalny.'],
+['TURBO MIX META-LEARNER','Ridge na sygnałach modeli, zmienności i reżimie. Eksperymentalny.']];
+const HIST=[1,0,0,0,0,1,1,1,1,1],DEF={g:.5,f:.25};
+const clamp=(x,a=-1,b=1)=>Math.max(a,Math.min(b,x)),dot=(a,b)=>a.reduce((s,v,i)=>s+v*b[i],0);
+const Phi=x=>{const t=1/(1+.2316419*Math.abs(x)),d=.3989423*Math.exp(-x*x/2),p=d*t*(.3193815+t*(-.3565638+t*(1.781478+t*(-1.821256+t*1.330274))));return x>0?1-p:p};
+// mu w jednostkach sigma horyzontu; f = próg stagnacji (ułamek sigma). Kolejność: [wzrost,spadek,stagnacja]
+const probs=(mu,f)=>{const a=Phi(-f-mu),b=1-Phi(f-mu);return[b,a,Math.max(0,1-a-b)]};
+const cl=(z,f)=>z>f?0:z<-f?1:2,br=(p,c)=>p.reduce((s,v,k)=>s+(v-(k==c?1:0))**2,0);
+function ridge(X,y,l){const n=X[0].length,A=Array.from({length:n},()=>Array(n+1).fill(0));
+ X.forEach((x,r)=>{for(let i=0;i<n;i++){for(let j=0;j<n;j++)A[i][j]+=x[i]*x[j];A[i][n]+=x[i]*y[r]}});
+ for(let i=0;i<n;i++)A[i][i]+=(i?l:0)+1e-9;
+ for(let i=0;i<n;i++){let p=i;for(let r=i+1;r<n;r++)if(Math.abs(A[r][i])>Math.abs(A[p][i]))p=r;[A[i],A[p]]=[A[p],A[i]];
+  for(let r=0;r<n;r++)if(r!=i){const q=A[r][i]/A[i][i];for(let c=i;c<=n;c++)A[r][c]-=q*A[i][c]}}
+ return A.map((r,i)=>r[n]/r[i])}
+const cor=(a,b)=>{const n=a.length,ma=a.reduce((s,v)=>s+v,0)/n,mb=b.reduce((s,v)=>s+v,0)/n;let x=0,y=0,z=0;for(let i=0;i<n;i++){x+=(a[i]-ma)*(b[i]-mb);y+=(a[i]-ma)**2;z+=(b[i]-mb)**2}return y&&z?x/Math.sqrt(y*z):0};
+// agregacja świec 1d → 5d: kubełki wyrównane do epoki Unix (floor(t/5d)); świeca zamknięta dopiero po końcu kubełka
+function agg5d(a,now){const m=new Map();a.forEach(r=>{const b=Math.floor(r.t/(5*D)),e=m.get(b);if(!e)m.set(b,{t:b*5*D,o:r.o,h:r.h,l:r.l,c:r.c});else{e.h=Math.max(e.h,r.h);e.l=Math.min(e.l,r.l);e.c=r.c}});return[...m.values()].map(x=>({...x,cl:x.t+5*D<=now}))}
+let C={c:[],t:[],cs1:[],cs2:[]},FM=new Map();
+function prep(){const c=C.c;C.cs1=[0];C.cs2=[0];for(let i=1;i<c.length;i++){const r=Math.log(c[i]/c[i-1]);C.cs1[i]=C.cs1[i-1]+r;C.cs2[i]=C.cs2[i-1]+r*r}FM.clear()}
+function F(i){if(i<210)return null;if(FM.has(i))return FM.get(i);const c=C.c,L=k=>Math.log(c[i]/c[i-k]),rs=[];
+ for(let j=i-29;j<=i;j++)rs.push(Math.log(c[j]/c[j-1]));const mn=rs.reduce((a,b)=>a+b)/30,vol=Math.sqrt(rs.reduce((a,b)=>a+(b-mn)**2,0)/29);
+ const va=Math.sqrt(Math.max(1e-8,C.cs2[i]/i-(C.cs1[i]/i)**2)),sd=.6*vol+.4*va,sma=k=>{let t=0;for(let j=i-k+1;j<=i;j++)t+=c[j];return t/k};
+ let g=0,l=0;for(let j=i-13;j<=i;j++){const d=c[j]-c[j-1];d>0?g+=d:l-=d}
+ const o={sd,vl:vol/va,z7:L(7)/(vol*Math.sqrt(7)),z30:L(30)/(vol*Math.sqrt(30)),z90:L(90)/(vol*Math.sqrt(90)),rsi:l?100-100/(1+g/l):100,ma:Math.log(c[i]/sma(200)),m50:Math.log(c[i]/sma(50)),t50:sma(50)>sma(200)};
+ FM.set(i,o);return o}
+const vec=f=>[1,f.z7,f.z30,f.z90,(f.rsi-50)/25,f.ma*2,Math.log(f.vl)];
+// sygnały s∈[-1,1] dziesięciu modeli bazowych (indeksy 0-9); x = dane „na żywo" tylko dla ostatniego punktu
+function SG(f,h,x,w){const T=Math.tanh,hs=1/(1+h/5),has=k=>x&&x[k]!=null;
+ const rg=Math.abs(f.ma)>.08?(f.t50?1:-1)*.35+.2*T(f.z30):-T(f.m50*6)*.4;
+ return[clamp(-f.ma/.5)*.7+(has('puell')?clamp((1-x.puell)/.6)*.3:0),has('addr')?.25*x.addr:0,has('tv')?-.25*x.tv:0,
+ has('imb')?.4*x.imb*hs:0,has('fund')?-.4*clamp(x.fund/4e-4)*hs:0,T(.35*(f.z30+f.z90)),f.vl>1.4?rg*.5:rg,w?clamp(2*dot(w,vec(f))):0,0,0]}
+function emp(p,f,Z){let u=0,d=0,n=0;for(const s of Z){if(s.mt>p.i)break;n++;if(s.z>f)u++;else if(s.z<-f)d++}
+ return n<30?probs(0,f):[(u+1)/(n+3),(d+1)/(n+3),(n-u-d+1)/(n+3)]}
+const pr=(p,m,cfg,Z)=>m==8?emp(p,cfg.f,Z):probs(cfg.g*p.s[m],cfg.f);
+function build(hb,h,x){const c=C.c,N=c.length,Z=[];
+ for(let j=210;j+hb<N;j+=5){const f=F(j);Z.push({j,mt:j+hb,z:Math.log(c[j+hb]/c[j])/(f.sd*Math.sqrt(hb)),v:vec(f)})}
+ const ix=[];for(let i=260;i<N-1;i+=10)ix.push(i);ix.push(N-1);let w=null,wb=-1;const P=[];
+ for(const i of ix){const live=i==N-1,f=F(i),b=Math.floor((i-260)/90);
+  if(b!=wb||live){const tr=Z.filter(s=>s.mt<=i);w=tr.length>=100?ridge(tr.map(s=>s.v),tr.map(s=>s.z),200):null;wb=b}
+  P.push({i,mt:i+hb,s:SG(f,live?h:hb,live?x:null,w),y:i+hb<N?Math.log(c[i+hb]/c[i])/(f.sd*Math.sqrt(hb)):null,rg:f.vl>1.4?2:f.t50?0:1,f})}
+ ens(P,Z);return{P,Z,hb,h}}
+function ens(P,Z){const B=P.map(p=>p.y==null?null:p.s.map((_,m)=>br(pr(p,m,DEF,Z),cl(p.y,DEF.f))));let CR=null;
+ const wt=sub=>{if(sub.length<30)return null;const bb=sub.reduce((a,j)=>a+B[j][9],0)||1,w=[];
+  for(let m=0;m<9;m++)w.push(Math.max(0,1-sub.reduce((a,j)=>a+B[j][m],0)/bb));
+  return w.map((v,m)=>CR?v/CR[m]:v)};
+ const mix=(w,s)=>{const t=w?w.reduce((a,b)=>a+b,0):0;return t>0?dot(w,s.slice(0,9))/t:0};
+ P.forEach((p,k)=>{const Q=[];for(let j=0;j<k;j++)if(P[j].y!=null&&P[j].mt<=p.i)Q.push(j);
+  if(k%5==0&&Q.length>=30)CR=[...Array(9).keys()].map(m=>1+3*[...Array(9).keys()].filter(n=>n!=m).reduce((a,n)=>a+Math.abs(cor(Q.map(j=>P[j].s[m]),Q.map(j=>P[j].s[n]))),0)/8);
+  const w1=wt(Q),w2=wt(Q.filter(j=>P[j].rg==p.rg))||w1;
+  let s12=0;if(Q.length>=40){const fx=q=>[1,...q.s.slice(0,9),Math.log(q.f.vl)],wm=ridge(Q.map(j=>fx(P[j])),Q.map(j=>P[j].y),100);s12=clamp(2*dot(wm,fx(p)))}
+  p.s.push(mix(w1,p.s),mix(w2,p.s)*(p.rg==2?.5:1),s12)})}
+function st(D,m,cfg,part=2){const pts=D.P.filter(p=>p.y!=null),n=pts.length,a=part==1?Math.floor(n*.7):0,b=part==0?Math.floor(n*.7):n;let sb=0,sbb=0,ok=0,c=0;
+ for(let k=a;k<b;k++){const p=pts[k],q=cl(p.y,cfg.f),pp=pr(p,m,cfg,D.Z),pb=pr(p,9,{g:.5,f:cfg.f},D.Z);sb+=br(pp,q);sbb+=br(pb,q);ok+=pp.indexOf(Math.max(...pp))==q;c++}
+ return{n:c,b:c?sb/c:1,bb:c?sbb/c:1,acc:c?ok/c:0}}
+//ENDPURE
+const sl=()=>new Promise(r=>setTimeout(r));
+/* ---------- IndexedDB: osobne rekordy każdego modelu (klucz m<id>), prognozy/wyniki append-only ---------- */
+const db=new Promise((ok,no)=>{const r=indexedDB.open('btcai',1);r.onupgradeneeded=()=>['models','fc','res','cyc','log'].forEach(s=>r.result.createObjectStore(s,{keyPath:'k'}));r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)});
+const tx=async(s,m,f)=>{const d=await db;return new Promise((ok,no)=>{const t=d.transaction(s,m);let q;try{q=f(t.objectStore(s))}catch(e){no(e)}t.oncomplete=()=>ok(q&&q.result);t.onerror=()=>no(t.error)})};
+const put=(s,v)=>tx(s,'readwrite',o=>o.put(v)),putMany=(s,a)=>tx(s,'readwrite',o=>{a.forEach(v=>o.put(v))}),all=s=>tx(s,'readonly',o=>o.getAll()),del=(s,k)=>tx(s,'readwrite',o=>o.delete(k)),get=(s,k)=>tx(s,'readonly',o=>o.get(k));
+/* ---------- dane ---------- */
+const HOSTS=['https://api.binance.com','https://data-api.binance.vision'];
+async function jf(p,hosts=HOSTS){for(let a=0;a<2;a++){for(const h of hosts){try{const r=await fetch(h+p);if(r.ok)return await r.json()}catch(e){}}await new Promise(r=>setTimeout(r,800*(a+1)))}throw new Error('API: '+p.split('?')[0])}
+let MS=[],DS=[],BT=[],LF=M.map(()=>[]),RES=[],FC=[],LOGS=[],TAB=0,HS=3,SEL={},CYC=null,SRC={},LASTTR=0,KC={};
+async function loadDaily(){let a=[];
+ if(!C.t.length){let s=Date.UTC(2017,7,17);for(;;){const r=await jf(`/api/v3/klines?symbol=BTCUSDT&interval=1d&startTime=${s}&limit=1000`);a=a.concat(r);if(r.length<1000)break;s=r[r.length-1][0]+D}C.t=a.map(r=>r[0]);C.c=a.map(r=>+r[4])}
+ else{const r=await jf(`/api/v3/klines?symbol=BTCUSDT&interval=1d&startTime=${C.t[C.t.length-1]-3*D}&limit=10`);r.forEach(k=>{const i=C.t.indexOf(k[0]);if(i<0){C.t.push(k[0]);C.c.push(+k[4])}else C.c[i]=+k[4]})}
+ if(C.c.some(v=>!(v>0)))throw new Error('niepoprawne ceny');SRC.spot=1;prep()}
+async function extras(){const x={};SRC.depth=SRC.fut=SRC.chain=0;
+ try{const d=await jf('/api/v3/depth?symbol=BTCUSDT&limit=100'),b=d.bids.reduce((a,v)=>a+ +v[1],0),s=d.asks.reduce((a,v)=>a+ +v[1],0);x.imb=(b-s)/(b+s);x.spr=d.asks[0][0]-d.bids[0][0];SRC.depth=1}catch(e){}
+ try{const F_=['https://fapi.binance.com'],p=await jf('/fapi/v1/premiumIndex?symbol=BTCUSDT',F_),o=await jf('/fapi/v1/openInterest?symbol=BTCUSDT',F_);x.fund=+p.lastFundingRate;x.basis=(+p.markPrice-+p.indexPrice)/+p.indexPrice;x.oi=+o.openInterest;SRC.fut=1}catch(e){}
+ const bc=async n=>{const r=await fetch(`https://api.blockchain.info/charts/${n}?timespan=400days&format=json&cors=true`);return(await r.json()).values.map(v=>v.y)};
+ const z=a=>{const t=a.slice(-90),m=t.reduce((s,v)=>s+v,0)/90,sd=Math.sqrt(t.reduce((s,v)=>s+(v-m)**2,0)/89)||1;return clamp((a[a.length-1]-m)/sd/2)};
+ try{const mr=await bc('miners-revenue');if(mr.length>=365)x.puell=mr[mr.length-1]/(mr.slice(-365).reduce((a,b)=>a+b,0)/365);SRC.chain=1}catch(e){}
+ try{x.addr=z(await bc('n-unique-addresses'))}catch(e){}
+ try{x.tv=z(await bc('estimated-transaction-volume-usd'))}catch(e){}
+ return x}
+/* ---------- prognozy i ocena ---------- */
+function mk(m,k,t,px){const Dk=DS[k],p=Dk.P[Dk.P.length-1],cfg=MS[m].cfg,h=H[k],mu=cfg.g*p.s[m],sg=p.f.sd*Math.sqrt(h),pp=pr(p,m,cfg,Dk.Z);
+ return{k:`${m}|${t}|${h}`,m,t,h,P0:px,mu:mu*sg,sg,tg:px*Math.exp(mu*sg),lo:px*Math.exp(mu*sg-1.2816*sg),hi:px*Math.exp(mu*sg+1.2816*sg),pu:pp[0],pd:pp[1],pf:pp[2],f:cfg.f,ver:MS[m].ver,rg:p.rg}}
+async function evalDue(){const R=new Set(RES.map(r=>r.k)),now=Date.now(),px={},out=[];let n=0;
+ for(const f of FC){if(R.has(f.k))continue;const tt=Math.round((f.t+f.h*D)/6e4)*6e4;if(tt>now-6e4)continue;
+  if(px[tt]==null){if(n++>25)continue;try{const a=await jf(`/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=${tt}&limit=1`);px[tt]=a[0]?+a[0][4]:0}catch(e){px[tt]=0}}
+  if(!px[tt])continue;const r=Math.log(px[tt]/f.P0),q=cl(r/f.sg,f.f),p=[f.pu,f.pd,f.pf];
+  out.push({k:f.k,m:f.m,h:f.h,t:f.t,tt,P1:px[tt],r,q,hit:p.indexOf(Math.max(...p))==q?1:0,br:br(p,q),ins:px[tt]>=f.lo&&px[tt]<=f.hi?1:0,pe:(Math.exp(r)-Math.exp(f.mu))*100,pu:f.pu})}
+ if(out.length){await putMany('res',out);RES=RES.concat(out)}return out.length}
+function stats(m,hk){const a=RES.filter(r=>r.m==m&&(hk==null||r.h==hk));if(!a.length)return null;const n=a.length,av=k=>a.reduce((s,r)=>s+r[k],0)/n,rec=a.slice(-30);
+ return{n,acc:av('hit'),br:av('br'),cov:av('ins'),mae:a.reduce((s,r)=>s+Math.abs(r.pe),0)/n,rec:rec.reduce((s,r)=>s+r.br,0)/rec.length,pu:av('pu'),fu:a.filter(r=>r.q==0).length/n}}
+/* ---------- kontrolowane samodoskonalenie ---------- */
+async function improve(t){LASTTR=t;const tr={k:'t'+t,t,horizons:H,rows:[]};
+ for(let m=0;m<10;m++){const S=MS[m],row={m,pts:DS.map(d=>d.P.filter(p=>p.y!=null).length)};tr.rows.push(row);
+  if(!HIST[m]||m==9){row.note='nie strojony (brak historii lub baseline)';continue}
+  if(t-S.dep<D){row.note='limit zmian: 1/24h';continue}
+  const ag=(cfg,part)=>{let s=0,n=0;DS.forEach(d=>{const r=st(d,m,cfg,part);if(r.n>=30){s+=r.b*r.n;n+=r.n}});return n?{b:s/n,n}:{b:1,n:0}};
+  const cur0=ag(S.cfg,0),cur1=ag(S.cfg,1);let best=null;
+  for(const g of(m==8?[.5]:[.25,.5,.75,1,1.5]))for(const f of[.15,.25,.4]){const c={g,f},a=ag(c,0);if(!best||a.b<best.a.b)best={c,a}}
+  const h1=ag(best.c,1),ok=cur0.n>=150&&best.a.b<cur0.b*.99&&h1.b<cur1.b*.99;
+  row.note=ok?`WDROŻONO g=${best.c.g} f=${best.c.f} (Brier trening ${cur0.b.toFixed(4)}→${best.a.b.toFixed(4)}, walidacja ${cur1.b.toFixed(4)}→${h1.b.toFixed(4)})`:`odrzucono (brak istotnej poprawy na obu zbiorach; n=${cur0.n})`;
+  if(ok){S.cfg=best.c;S.versions.push({ver:S.versions.length+1,cfg:best.c,t,why:row.note});S.ver=S.versions.length;S.dep=t;await put('models',S)}
+  lg(`Model ${m+1}: ${row.note}`)}
+ await put('log',tr)}
+async function rb(m){const S=MS[m];if(S.versions.length<2)return alert('Brak wcześniejszej wersji');S.versions.pop();const v=S.versions[S.versions.length-1];S.cfg={...v.cfg};S.ver=S.versions.length;S.dep=Date.now();await put('models',S);lg(`Model ${m+1}: przywrócono wersję ${S.ver}`);render()}
+async function lg(msg){const e={k:'l'+Date.now()+Math.random(),t:Date.now(),msg};LOGS.unshift(e);await put('log',e)}
+/* ---------- cykl co 24 min (blokada przed równoległym uruchomieniem, także między kartami) ---------- */
+const CYCLE=24*60e3;
+async function runCycle(){if(navigator.locks)await navigator.locks.request('btc-cycle',{ifAvailable:true},l=>l?body():0);else await body()}
+let busy=false;
+async function body(){if(busy)return;busy=true;const t=Date.now();document.getElementById('st').textContent='cykl w toku…';
+ try{if(CYC&&t-CYC>CYCLE*1.5)await lg(`Opóźnienie cyklu: ${Math.round((t-CYC)/6e4)} min (karta była nieaktywna)`);
+  await loadDaily();const x=await extras(),N=C.c.length,px=C.c[N-1];
+  if(t-C.t[N-1]>D+36e5)throw new Error('dane nieaktualne');
+  DS=[];for(let k=0;k<H.length;k++){DS.push(build(Math.max(1,Math.round(H[k])),H[k],x));await sl()}
+  BT=M.map((_,m)=>H.map((_,k)=>st(DS[k],m,MS[m].cfg)));
+  const recs=[];M.forEach((_,m)=>H.forEach((h,k)=>{const f=mk(m,k,t,px);LF[m][k]=f;recs.push(f)}));
+  await putMany('fc',recs);FC=FC.concat(recs);
+  await put('cyc',{k:'c'+t,t,px,x,q:{...SRC},feat:DS[3].P[DS[3].P.length-1].f,n:recs.length});
+  const n=await evalDue();if(t-LASTTR>=12*36e5)await improve(t);
+  CYC=t;await lg(`Cykl OK: ${recs.length} prognoz zapisanych, ${n} ocenionych`)}
+ catch(e){await lg('BŁĄD cyklu: '+e.message)}
+ busy=false;render()}
+/* ---------- wykresy ---------- */
+async function kl(iv){const k=iv+Math.floor(Date.now()/6e4);if(KC[k])return KC[k];let r;
+ if(iv=='5d'){const a=await jf('/api/v3/klines?symbol=BTCUSDT&interval=1d&limit=1000');r=agg5d(a.map(v=>({t:v[0],o:+v[1],h:+v[2],l:+v[3],c:+v[4]})),Date.now())}
+ else{const a=await jf(`/api/v3/klines?symbol=BTCUSDT&interval=${iv}&limit=100`);r=a.map(v=>({t:v[0],o:+v[1],h:+v[2],l:+v[3],c:+v[4],cl:v[6]<Date.now()}))}
+ KC[k]=r;return r}
+function draw(cv,k,fc,hist){const dp=devicePixelRatio||1,w=cv.clientWidth,h=cv.clientHeight;cv.width=w*dp;cv.height=h*dp;const g=cv.getContext('2d');g.scale(dp,dp);
+ const cs=getComputedStyle(document.body),col=n=>cs.getPropertyValue(n).trim()||'#888',up=col('--g'),dn=col('--r'),mu=col('--m'),ac=col('--a');
+ const v=k.slice(-70),R=96,pw=w-R-44,cw=pw/v.length;let lo=Math.min(...v.map(a=>a.l)),hi=Math.max(...v.map(a=>a.h));
+ if(fc){lo=Math.min(lo,fc.tg);hi=Math.max(hi,fc.tg)}const pad=(hi-lo)*.06||1;lo-=pad;hi+=pad;const Y=p=>8+(hi-p)/(hi-lo)*(h-20);
+ g.font='10px system-ui';g.fillStyle=mu;g.strokeStyle=col('--b');
+ for(let i=0;i<5;i++){const p=lo+(hi-lo)*i/4;g.beginPath();g.moveTo(0,Y(p));g.lineTo(w-44,Y(p));g.stroke();g.fillText(p.toFixed(0),w-42,Y(p)+3)}
+ v.forEach((a,i)=>{const x=i*cw+cw/2,c=a.c>=a.o?up:dn;g.strokeStyle=g.fillStyle=c;g.beginPath();g.moveTo(x,Y(a.h));g.lineTo(x,Y(a.l));g.stroke();
+  const y1=Y(Math.max(a.o,a.c)),y2=Math.max(Y(Math.min(a.o,a.c)),y1+1);if(a.cl===false){g.fillStyle=col('--bg');g.fillRect(x-cw*.35,y1,cw*.7,y2-y1);g.strokeRect(x-cw*.35,y1,cw*.7,y2-y1)}else g.fillRect(x-cw*.35,y1,cw*.7,y2-y1)});
+ const last=v[v.length-1],yc=Y(last.c);g.setLineDash([4,3]);g.strokeStyle=ac;g.beginPath();g.moveTo(0,yc);g.lineTo(w-44,yc);g.stroke();g.setLineDash([]);g.fillStyle=ac;g.fillText(last.c.toFixed(0),w-42,yc-3);
+ const x0=pw+8;g.strokeStyle=mu;g.setLineDash([2,4]);g.beginPath();g.moveTo(x0,0);g.lineTo(x0,h);g.stroke();g.setLineDash([]);g.fillStyle=mu;g.fillText('prognoza',x0+4,10);
+ (hist||[]).forEach(f=>{const i=v.findIndex(a=>a.t>=f.t);if(i<0)return;const r=RES.find(q=>q.k==f.k);g.fillStyle=r?(r.hit?up:dn):mu;g.beginPath();g.arc(i*cw+cw/2,Y(f.P0),3,0,7);g.fill()});
+ if(fc){const c=fc.pu>fc.pd&&fc.pu>fc.pf?up:fc.pd>fc.pu&&fc.pd>fc.pf?dn:col('--y'),yt=Y(fc.tg);
+  g.globalAlpha=.18;g.fillStyle=c;const yh=Math.max(0,Y(fc.hi)),yl=Math.min(h,Y(fc.lo));g.fillRect(x0+10,yh,R-20,yl-yh);g.globalAlpha=1;
+  g.strokeStyle=c;g.setLineDash([5,3]);g.beginPath();g.moveTo(pw,yc);g.lineTo(x0+R-10,yt);g.stroke();g.setLineDash([]);
+  g.fillStyle=c;g.fillText(((fc.tg/fc.P0-1)*100).toFixed(1)+'% ('+hl(fc.h)+')',x0+12,Math.max(22,Math.min(h-6,yt-4)));g.fillStyle=mu;g.fillText('cel '+fc.tg.toFixed(0),x0+12,Math.max(34,Math.min(h-16,yt+8)))}}
+async function charts(m){const hk=H[HS],fc=LF[m][HS],hist=FC.filter(f=>f.m==m&&f.h==hk).slice(-150);
+ for(let i=0;i<5;i++){const cv=document.getElementById('cv'+i);if(!cv)continue;try{draw(cv,await kl(SEL[TAB][i]),fc,hist)}catch(e){const g=cv.getContext('2d');cv.width=cv.clientWidth;g.fillStyle='#888';g.fillText('Brak danych wykresu: '+e.message,10,20)}}}
+/* ---------- interfejs ---------- */
+const IV=['1m','5m','15m','1h','4h','6h','12h','5d','1w'],IVL={'1m':'1 min','5m':'5 min','15m':'15 min','1h':'1 godz.','4h':'4 godz.','6h':'6 godz.','12h':'12 godz.','5d':'5 dni','1w':'1 tydz.'};
+const dirOf=f=>f.pu>=f.pd&&f.pu>=f.pf?['▲ WZROST','up']:f.pd>f.pu&&f.pd>=f.pf?['▼ SPADEK','dn']:['■ STAGNACJA','fl'];
+const pc=v=>(v*100).toFixed(1)+'%',pct=f=>((f.tg/f.P0-1)*100).toFixed(2)+'%',lt=t=>new Date(t).toLocaleString();
+const bars=f=>`<div class=bar><i style="width:${f.pu*100}%;background:var(--g)"></i><i style="width:${f.pf*100}%;background:var(--y)"></i><i style="width:${f.pd*100}%;background:var(--r)"></i></div>`;
+function nav(){document.getElementById('nav').innerHTML=M.map((x,i)=>`<button class="${TAB==i?'on':''}" onclick="TAB=${i};render()">${i+1}. ${x[0].split(' ').slice(0,2).join(' ')}</button>`).join('')+`<button class="${TAB==13?'on':''}" onclick="TAB=13;render()">Porównanie</button><button class="${TAB==14?'on':''}" onclick="TAB=14;render()">Lab / Status</button>`}
+function flag(m,k){const b=BT[m]&&BT[m][k];if(m==9)return'punkt odniesienia';if(!HIST[m]&&m<5)return'tylko na żywo';if(!b||b.n<30)return'brak historii (niezweryfikowany)';const s=1-b.b/b.bb;return s>.01&&b.n>=60?'przewaga (walk-forward)':'eksperymentalny'}
+function rModel(m){SEL[m]=SEL[m]||['1m','5m','15m','1h','4h'];const S=MS[m],fc=LF[m][HS];
+ let h=`<h2>${m+1}. ${M[m][0]} <small>wersja ${S.ver} · g=${S.cfg.g} f=${S.cfg.f}</small></h2><div class=mu>${M[m][1]}</div>`;
+ h+=`<div class=box>Horyzont na wykresach: <select onchange="HS=+this.value;render()">${H.map((x,i)=>`<option value=${i} ${i==HS?'selected':''}>${hl(x)}</option>`).join('')}</select> <button onclick="rb(${m})">Cofnij wersję</button>`;
+ if(fc){const d=dirOf(fc),old=CYC&&Date.now()-fc.t>CYCLE*2;h+=`<h2 class=${d[1]}>${d[0]} ${pct(fc)} → ${fc.tg.toFixed(0)} USD</h2><div>Przedział 80%: ${fc.lo.toFixed(0)} – ${fc.hi.toFixed(0)} · wzrost ${pc(fc.pu)} · spadek ${pc(fc.pd)} · stagnacja ${pc(fc.pf)}</div>${bars(fc)}<small>Wygenerowano ${lt(fc.t)} z ceny ${fc.P0.toFixed(0)}; stagnacja = |zmiana| < ${fc.f}σ horyzontu. ${old?'<span class=warn>DANE NIEAKTUALNE</span>':''}</small>`}else h+='<p class=warn>Brak prognozy – czekam na pierwszy cykl.</p>';
+ h+='</div><div class=grid>'+[0,1,2,3,4].map(i=>`<div class=box><select onchange="SEL[${m}][${i}]=this.value;charts(${m})">${IV.map(v=>`<option value=${v} ${SEL[m][i]==v?'selected':''}>${IVL[v]}</option>`).join('')}</select><canvas id=cv${i}></canvas></div>`).join('')+'</div>';
+ h+=`<div class="box sc"><table><tr><th>Horyzont<th>Kierunek<th>Zmiana<th>Cel<th>Przedział 80%<th>↑<th>↓<th>■<th>WF n<th>WF Brier-skill<th>WF trafność<th>Live n<th>Live trafność<th>Live Brier<th>Pokrycie przedz.<th>Status</tr>`+H.map((x,k)=>{const f=LF[m][k],b=BT[m]&&BT[m][k],s=stats(m,x);if(!f)return`<tr><td>${hl(x)}<td colspan=15>–`;const d=dirOf(f);
+  return`<tr><td>${hl(x)}<td class=${d[1]}>${d[0]}<td>${pct(f)}<td>${f.tg.toFixed(0)}<td>${f.lo.toFixed(0)}–${f.hi.toFixed(0)}<td>${pc(f.pu)}<td>${pc(f.pd)}<td>${pc(f.pf)}<td>${b?b.n:'–'}<td>${b&&b.n>=30?((1-b.b/b.bb)*100).toFixed(1)+'%':'–'}<td>${b&&b.n>=30?pc(b.acc):'–'}<td>${s?s.n:0}<td>${s?pc(s.acc):'–'}<td>${s?s.br.toFixed(3):'–'}<td>${s?pc(s.cov):'–'}<td>${flag(m,k)}`}).join('')+'</table><small>Horyzonty ≥ ~9 lat (3333d, 5222d) i 1144d+ nie mają wystarczającej historii do walk-forward – oceniane dopiero po dojrzeniu. 12h backtestowane na proxy 1d.</small></div>';
+ const s=stats(m);h+=`<div class=box><b>Skuteczność live (wszystkie horyzonty)</b>: ${s?`n=${s.n}, trafność ${pc(s.acc)}, Brier ${s.br.toFixed(4)}, MAE ${s.mae.toFixed(2)} pp, pokrycie 80% = ${pc(s.cov)}, śr. P(wzrost) ${pc(s.pu)} vs faktyczna częstość ${pc(s.fu)}${s.n>=60&&s.rec>s.br*1.2?' <span class=warn>⚠ ostatnie 30 ocen gorsze o >20% – możliwa utrata skuteczności</span>':''}`:'brak ocenionych prognoz (pierwsze wyniki po 12h)'}</div>`;
+ h+=`<div class=box><b>Wersje i uczenie</b><br>${S.versions.map(v=>`v${v.ver} g=${v.cfg.g} f=${v.cfg.f} – ${lt(v.t)} – ${v.why}`).join('<br>')}</div>`;
+ h+=`<div class="box sc"><b>Historia prognoz (ostatnie 20, nigdy nie nadpisywane)</b><table><tr><th>Czas<th>Hor.<th>Cena<th>Cel<th>Kierunek<th>Wynik</tr>`+FC.filter(f=>f.m==m).slice(-20).reverse().map(f=>{const r=RES.find(q=>q.k==f.k),d=dirOf(f);return`<tr><td>${lt(f.t)}<td>${hl(f.h)}<td>${f.P0.toFixed(0)}<td>${f.tg.toFixed(0)}<td class=${d[1]}>${d[0]}<td>${r?`${((Math.exp(r.r)-1)*100).toFixed(2)}% ${r.hit?'✔':'✘'}`:'oczekuje'}`}).join('')+'</table></div>';
+ return h}
+function rCmp(){let h='<h2>Porównanie 13 systemów</h2><div class="box sc"><table><tr><th>Model'+H.map(x=>`<th>${hl(x)}`).join('')+'</tr>';
+ M.forEach((x,m)=>{h+=`<tr><td>${m+1}. ${x[0]}`+H.map((_,k)=>{const f=LF[m][k];if(!f)return'<td>–';const d=dirOf(f);return`<td class=${d[1]}>${d[0][0]} ${pct(f)}`}).join('')});
+ h+='<tr><td><b>Rozbieżność</b>'+H.map((_,k)=>{let u=0,d=0;for(let m=0;m<13;m++){const f=LF[m][k];if(!f)continue;const x=dirOf(f)[1];if(x=='up')u++;if(x=='dn')d++}return`<td class=${u&&d?'warn':''}>${u&&d?`⚠ ${u}↑/${d}↓`:`${u}↑/${d}↓`}`}).join('')+'</table><small>▲ wzrost ▼ spadek ■ stagnacja. Nie pokazuję średniej prognoz – liczba modeli nie oznacza większej wiarygodności; sprzeczne kierunki są oznaczone ⚠.</small></div>';
+ h+='<div class="box sc"><b>Skuteczność live i walk-forward (horyzont wybrany: '+hl(H[HS])+')</b> <select onchange="HS=+this.value;render()">'+H.map((x,i)=>`<option value=${i} ${i==HS?'selected':''}>${hl(x)}</option>`).join('')+'</select><table><tr><th>Model<th>WF n<th>WF Brier-skill vs baseline<th>Live n<th>Live trafność<th>Live Brier<th>Status</tr>'+M.map((x,m)=>{const b=BT[m]&&BT[m][HS],s=stats(m,H[HS]);return`<tr><td>${m+1}. ${x[0]}<td>${b?b.n:'–'}<td>${b&&b.n>=30?((1-b.b/b.bb)*100).toFixed(1)+'%':'–'}<td>${s?s.n:0}<td>${s?pc(s.acc):'–'}<td>${s?s.br.toFixed(3):'–'}<td>${flag(m,HS)}`}).join('')+'</table></div>';return h}
+const IND=[['MVRV, MVRV Z-Score, Realized Price, NUPL','NIEDOSTĘPNE','płatne (Glassnode/CryptoQuant)'],['LTH/STH-SOPR, HODL Waves, Net Position Change LTH','NIEDOSTĘPNE','płatne'],['Exchange Netflow, rezerwy giełdowe','NIEDOSTĘPNE','płatne'],['Puell Multiple','dostępny (liczony)','blockchain.info: miners-revenue'],['Aktywne adresy, wolumen transferów','dostępne (z-score 90d)','blockchain.info'],['Liczba transakcji, hash rate','dostępne w API (nieużyte w modelach)','blockchain.info'],['Arkusz zleceń, spread','dostępne (live)','Binance spot'],['Funding rate, open interest, baza','dostępne (live)','Binance Futures (może być blokowane regionalnie)'],['Likwidacje','NIEDOSTĘPNE','brak publicznego REST z historią'],['DXY, stopy, płynność, przepływy ETF','NIEDOSTĘPNE w tej wersji','brak darmowego API z CORS']];
+function rLab(){const ok=v=>v?'<span class=up>OK</span>':'<span class=dn>brak</span>';
+ let h=`<h2>Status i Lab</h2><div class=box>Źródła (ostatni cykl): Binance spot ${ok(SRC.spot)} · arkusz ${ok(SRC.depth)} · futures ${ok(SRC.fut)} · blockchain.info ${ok(SRC.chain)}<br>Ostatni cykl: ${CYC?lt(CYC):'–'} · następny: ${CYC?lt(CYC+CYCLE):'–'} · prognoz w bazie: ${FC.length} · ocen: ${RES.length}<br><button onclick="runCycle()">Uruchom cykl teraz</button> <button onclick="expo()">Eksport kopii (JSON)</button> <label class=mu>Import: <input type=file accept=.json onchange="impo(this.files[0])"></label> <button onclick="tests()">Uruchom testy</button></div><div id=tr class=box style="display:none"></div>`;
+ h+='<div class="box sc"><b>Wskaźniki</b><table><tr><th>Wskaźnik<th>Status<th>Źródło</tr>'+IND.map(r=>`<tr><td>${r[0]}<td>${r[1]}<td>${r[2]}`).join('')+'</table></div>';
+ h+=`<div class=box><b>Ograniczenia (uczciwie)</b><br>• Cały system działa w Twojej przeglądarce (GitHub Pages = brak backendu). Cykle i zapis dzieją się tylko, gdy strona jest otwarta; przy zamknięciu karty cykle są pomijane (zapisywane jako opóźnienie).<br>• Dane w IndexedDB tej przeglądarki – rób eksport kopii.<br>• Cykl = co 24 min (pełny zapis prognoz 13 modeli × 14 horyzontów: ${H.map(hl).join(', ')}); trening/selekcja co 12h z rejestrem punktów danych.<br>• Wykresy odświeżają się co minutę, ale prognoz nie przeliczają.</div>`;
+ h+='<div class="box sc"><b>Dziennik</b><pre>'+LOGS.filter(l=>l.msg).slice(0,40).map(l=>lt(l.t)+'  '+l.msg).join('\n')+'</pre></div>';return h}
+let rt=0;function render(){nav();const el=document.getElementById('mn');el.innerHTML=TAB<13?rModel(TAB):TAB==13?rCmp():rLab();
+ document.getElementById('st').textContent=CYC?`ostatnia aktualizacja ${lt(CYC)} · cykl 24 min`:'czekam na pierwszy cykl…';if(TAB<13)charts(TAB)}
+/* ---------- kopie zapasowe ---------- */
+async function expo(){const o={};for(const s of['models','fc','res','cyc','log'])o[s]=await all(s);const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(o)],{type:'application/json'}));a.download='btc-ai-backup-'+new Date().toISOString().slice(0,10)+'.json';a.click()}
+async function impo(f){if(!f)return;const o=JSON.parse(await f.text());for(const s in o)await putMany(s,o[s]);alert('Zaimportowano. Odświeżam.');location.reload()}
+/* ---------- testy w przeglądarce ---------- */
+async function tests(){const R=[],T=(n,c)=>R.push([n,!!c]);
+ T('prawdopodobieństwa sumują się do 1',[-2,-.5,0,.7,3].every(m=>Math.abs(probs(m,.25).reduce((a,b)=>a+b)-1)<1e-9));
+ T('Brier idealnej prognozy = 0',br([1,0,0],0)==0);
+ const a=agg5d([0,1,2,3,4].map(i=>({t:i*D,o:10+i,h:20+i,l:1+i,c:15+i})),9e15)[0];T('agregacja 5d: O=pierwsze, H=max, L=min, C=ostatnie',a.o==10&&a.h==24&&a.l==1&&a.c==19&&a.cl);
+ T('niezamknięta świeca 5d oznaczona',agg5d([{t:0,o:1,h:1,l:1,c:1}],D)[0].cl===false);
+ T('zmiana % zgodna z ceną docelową',(f=>Math.abs(f.tg-f.P0*(1+(f.tg/f.P0-1)))<1e-6)({tg:105,P0:100}));
+ const w=ridge([[1,0],[1,1],[1,2],[1,3]],[1,3,5,7],0);T('regresja ridge odtwarza prostą y=1+2x',Math.abs(w[0]-1)<.01&&Math.abs(w[1]-2)<.01);
+ if(C.c.length>1000){const sv={...C},full=C.c.slice(),ft=C.t.slice(),cut=C.c.length-300;
+  C={c:full.slice(0,cut),t:ft.slice(0,cut),cs1:[],cs2:[]};prep();const A=build(10,10,null).P.find(p=>p.i==1000);
+  C={c:full,t:ft,cs1:[],cs2:[]};prep();const B=build(10,10,null).P.find(p=>p.i==1000);
+  T('brak wycieku przyszłości: sygnały w punkcie 1000 identyczne bez ostatnich 300 dni',A&&B&&A.s.slice(0,13).every((v,i)=>Math.abs(v-B.s[i])<1e-9));}
+ else R.push(['test wycieku wymaga załadowanych danych (uruchom cykl)',false]);
+ try{await put('models',{k:'_test',v:1});await put('models',{k:'_test2',v:2});await put('models',{k:'_test',v:9});const r1=await get('models','_test'),r2=await get('models','_test2');T('zapis/odczyt i izolacja rekordów modeli',r1.v==9&&r2.v==2);await del('models','_test');await del('models','_test2')}catch(e){T('IndexedDB',0)}
+ const c0=JSON.stringify(MS[1].cfg),sv=MS[0].cfg;MS[0].cfg={g:9,f:.9};T('zmiana parametrów modelu 1 nie zmienia modelu 2',JSON.stringify(MS[1].cfg)==c0);MS[0].cfg=sv;
+ T('sprawdzanie dojrzałych prognoz: horyzont 0.5d → próg czasu',(t=>t+.5*D<=t+D)(0));
+ const el=document.getElementById('tr');el.style.display='block';el.innerHTML='<b>Wyniki testów</b><br>'+R.map(r=>`${r[1]?'<span class=up>✔</span>':'<span class=dn>✘</span>'} ${r[0]}`).join('<br>')}
+/* ---------- start ---------- */
+(async()=>{try{const ms=await all('models');MS=M.map((_,m)=>ms.find(r=>r.k=='m'+m)||{k:'m'+m,ver:1,cfg:{...DEF},versions:[{ver:1,cfg:{...DEF},t:Date.now(),why:'start'}],dep:0});
+ FC=(await all('fc')).sort((a,b)=>a.t-b.t);RES=await all('res');LOGS=(await all('log')).sort((a,b)=>b.t-a.t);LASTTR=Math.max(0,...LOGS.filter(l=>l.k[0]=='t').map(l=>l.t));
+ const cy=(await all('cyc')).sort((a,b)=>a.t-b.t);CYC=cy.length?cy[cy.length-1].t:null;
+ FC.forEach(f=>{const k=H.indexOf(f.h);if(k>=0)LF[f.m][k]=f});render();runCycle();setInterval(runCycle,CYCLE);setInterval(()=>{if(TAB<13)charts(TAB)},6e4)}
+ catch(e){document.getElementById('mn').innerHTML='<p class=warn>Błąd inicjalizacji (IndexedDB niedostępne? tryb prywatny?): '+e.message+'</p>'}})();
+</script></body></html>
